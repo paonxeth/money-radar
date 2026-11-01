@@ -1,0 +1,86 @@
+{
+ "status": "success",
+ "result": {
+  "projects": [
+   {
+    "id": 40111001, "owner_id": 9001, "title": "Chrome extension to export LinkedIn leads to CSV",
+    "status": "active", "seo_url": "javascript/Chrome-extension-export-LinkedIn",
+    "currency": {"id": 1, "code": "USD", "sign": "$", "exchange_rate": 1},
+    "preview_description": "Need a MV3 extension...", "type": "fixed", "bidperiod": 7,
+    "budget": {"minimum": 250, "maximum": 750},
+    "bid_stats": {"bid_count": 9, "bid_avg": 480.5},
+    "time_submitted": 1793400000, "time_updated": 1793401000, "language": "en", "local": false,
+    "jobs": [
+     {"id": 7, "name": "JavaScript", "category": {"id": 1, "name": "Websites, IT & Software"}},
+     {"id": 1092, "name": "Google Chrome", "category": {"id": 1, "name": "Websites, IT & Software"}}
+    ]
+   },
+   {
+    "id": 40111002, "owner_id": 9002, "title": "Logo for my bakery",
+    "status": "active", "seo_url": "logo-design/Logo-for-bakery",
+    "currency": {"id": 11, "code": "INR", "sign": "₹", "exchange_rate": 0.012},
+    "type": "fixed", "budget": {"minimum": 600, "maximum": 1500},
+    "bid_stats": {"bid_count": 41, "bid_avg": 1100},
+    "time_submitted": 1793401000, "language": "en", "local": false,
+    "jobs": [{"id": 32, "name": "Logo Design", "category": {"id": 3, "name": "Design, Media & Architecture"}}]
+   },
+   {
+    "id": 40111003, "owner_id": 9003, "title": "n8n workflow to sync Shopify orders to Google Sheets",
+    "status": "active", "seo_url": "automation/n8n-workflow-sync",
+    "currency": {"id": 3, "code": "EUR", "sign": "€", "exchange_rate": 1.08},
+    "type": "hourly", "budget": {"minimum": 15, "maximum": 25},
+    "hourly_project_info": {"commitment": {"hours": 10, "interval": "week"}, "duration_enum": "unspecified"},
+    "bid_stats": {"bid_count": 6, "bid_avg": 21},
+    "time_submitted": 1793402000, "language": "en", "local": false,
+    "jobs": [{"id": 2183, "name": "Zapier", "category": {"id": 1, "name": "Websites, IT & Software"}}]
+   },
+   {
+    "id": 40111004, "owner_id": 9004, "title": "Plumber needed for kitchen sink",
+    "status": "active", "seo_url": "local/Plumber-needed",
+    "currency": {"id": 4, "code": "AUD", "sign": "$", "exchange_rate": 0.66},
+    "type": "fixed", "budget": {"minimum": 100, "maximum": 300},
+    "bid_stats": {"bid_count": 2, "bid_avg": 150},
+    "time_submitted": 1793403000, "language": "en", "local": true,
+    "jobs": [{"id": 900, "name": "Plumbing", "category": {"id": 9, "name": "Local Jobs & Services"}}]
+   },
+   {
+    "id": 40111005, "owner_id": 9005, "title": "Unpaid test task for video editors",
+    "status": "active", "seo_url": "video/Unpaid-test",
+    "currency": {"id": 1, "code": "USD", "sign": "$", "exchange_rate": 1},
+    "type": "fixed", "budget": {"minimum": 30, "maximum": 250},
+    "bid_stats": {"bid_count": 30, "bid_avg": 60},
+    "time_submitted": 1793404000, "language": "en", "local": false,
+    "jobs": [{"id": 50, "name": "Video Editing", "category": {"id": 3, "name": "Design, Media & Architecture"}}]
+   },
+   {
+    "id": 40111006, "owner_id": 9001, "title": "Chrome extension to export LinkedIn leads to CSV!",
+    "status": "active", "seo_url": "javascript/Chrome-extension-export-LinkedIn-2",
+    "currency": {"id": 1, "code": "USD", "sign": "$", "exchange_rate": 1},
+    "type": "fixed", "budget": {"minimum": 250, "maximum": 750},
+    "bid_stats": {"bid_count": 3},
+    "time_submitted": 1793405000, "language": "en",
+    "jobs": [{"id": 1092, "name": "Google Chrome", "category": {"id": 1, "name": "Websites, IT & Software"}}]
+   },
+   {
+    "id": 40111007, "owner_id": 9007, "title": "Data entry 100 rows",
+    "status": "active", "seo_url": "data-entry/Data-entry-rows",
+    "currency": {"id": 1, "code": "USD", "sign": "$", "exchange_rate": 1},
+    "type": "fixed", "budget": {"minimum": 5, "maximum": 15},
+    "bid_stats": {"bid_count": 55},
+    "time_submitted": 1793406000, "language": "en",
+    "jobs": [{"id": 36, "name": "Data Entry", "category": {"id": 4, "name": "Data Entry & Admin"}}]
+   },
+   {
+    "id": 40111008, "owner_id": 9008, "title": "Traduire mon site en anglais",
+    "status": "active", "seo_url": "translation/Traduire",
+    "currency": {"id": 3, "code": "EUR", "sign": "€", "exchange_rate": 1.08},
+    "type": "fixed", "budget": {"minimum": 100, "maximum": 200},
+    "bid_stats": {"bid_count": 12},
+    "time_submitted": 1793407000, "language": "fr",
+    "jobs": [{"id": 22, "name": "Translation", "category": {"id": 5, "name": "Translation & Languages"}}]
+   }
+  ],
+  "total_count": 8
+ },
+ "request_id": "test"
+}

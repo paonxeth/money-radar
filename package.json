@@ -1,0 +1,11 @@
+{
+  "name": "money-radar",
+  "private": true,
+  "description": "Optional: render the Money Radar dashboard into a video",
+  "scripts": {
+    "video": "node video/capture.cjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.48.0"
+  }
+}

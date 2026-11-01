@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Money Radar</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #07090b; }
+  body { display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  canvas { display: block; }
+  body.capture { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+window.RADAR = /*__RADAR_DATA__*/null;
+</script>
+<script>
+(() => {
+"use strict";
+const W = 1080, H = 1350, T = 24;
+const Q = new URLSearchParams(location.search);
+const CAPTURE = Q.has("capture");
+const SCALE = parseFloat(Q.get("scale") || (CAPTURE ? "1" : String(Math.min(2, window.devicePixelRatio || 1))));
+const canvas = document.getElementById("c");
+canvas.width = W * SCALE; canvas.height = H * SCALE;
+const ctx = canvas.getContext("2d");
+if (CAPTURE) document.body.classList.add("capture");
+
+// ---------- palette & type ----------
+const C = {
+  bg: "#0a0c0f", panel: "#0e1115", line: "#1b2128", grid: "#13181d",
+  text: "#e7ebee", dim: "#8793a0", faint: "#4b5662", ghost: "#2a323b",
+  teal: "#4fd1c5", amber: "#f4b54a", red: "#ff5d5d", green: "#6fdc8c", violet: "#a99cff",
+};
+const SANS = "Inter, 'Helvetica Neue', Arial, sans-serif";
+const MONO = "'JetBrains Mono', 'IBM Plex Mono', 'DejaVu Sans Mono', ui-monospace, monospace";
+const font = (px, w = 400, mono = false) => `${w} ${px}px ${mono ? MONO : SANS}`;
+
+// ---------- data ----------
+const D = window.RADAR || { pipeline: {}, niches: [], top: [], crowded: [], candidates: [], sim: {}, events: [], agents: [], days: [] };
+const P = Object.assign({ read: 0, cut: 0, cut_reasons: {}, kept: 0, mapped: 0, unmapped: 0, niches: 0, checked: 0, survived: 0 }, D.pipeline || {});
+const names = Object.fromEntries((D.niches || []).map(n => [n.id, n.name]));
+const typical = Math.round(D.typical_bids || 0);
+
+// ---------- helpers ----------
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const lerp = (a, b, k) => a + (b - a) * k;
+const ease = k => (k = clamp(k), k < .5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2);
+const easeOut = k => 1 - Math.pow(1 - clamp(k), 3);
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const fmt = n => Math.round(n).toLocaleString("en-US");
+const money = n => n >= 10000 ? "$" + (n / 1000).toFixed(0) + "k" : n >= 1000 ? "$" + (n / 1000).toFixed(1) + "k" : "$" + Math.round(n);
+const trunc = (s, n) => s.length > n ? s.slice(0, n - 1) + "…" : s;
+function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function bsearch(arr, t) { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] <= t) lo = m + 1; else hi = m; } return lo; }
+const qb = (a, c, b, k) => (1 - k) * (1 - k) * a + 2 * (1 - k) * k * c + k * k * b;
+function text(s, x, y, f, col, align = "left") { ctx.font = f; ctx.fillStyle = col; ctx.textAlign = align; ctx.fillText(s, x, y); }
+function rect(x, y, w, h, col) { ctx.fillStyle = col; ctx.fillRect(x, y, w, h); }
+function stroke(x, y, w, h, col, lw = 1) { ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.strokeRect(x + .5, y + .5, w - 1, h - 1); }
+function tracked(s, x, y, f, col, sp = 1.5, align = "left") {
+  ctx.font = f; ctx.fillStyle = col; ctx.textAlign = "left";
+  let w = 0; for (const ch of s) w += ctx.measureText(ch).width + sp; w -= sp;
+  let cx = align === "right" ? x - w : align === "center" ? x - w / 2 : x;
+  for (const ch of s) { ctx.fillText(ch, cx, y); cx += ctx.measureText(ch).width + sp; }
+  return w;
+}
+
+// ---------- timeline ----------
+const PH = [
+  ["SCOUT", "reads every job", 0.8, 6.6],
+  ["GATE", "cuts junk", 5.0, 8.6],
+  ["MAPPER", "sorts into niches", 7.0, 11.6],
+  ["ANALYST", "does the math", 11.6, 14.6],
+  ["SKEPTIC", "checks the web", 14.6, 19.2],
+  ["BRIEFER", "sends 3 niches", 19.2, T],
+];
+
+// ---------- lanes: which niches get a line ----------
+const elig = (D.niches || []).filter(n => n.eligible);
+const inel = (D.niches || []).filter(n => !n.eligible).sort((a, b) => b.jobs_week - a.jobs_week);
+const LANES = elig.slice(0, 14).concat(inel.slice(0, 20 - Math.min(14, elig.length))).slice(0, 20);
+const NL = LANES.length;
+const volOrder = LANES.map((n, i) => i).sort((a, b) => LANES[b].jobs_week - LANES[a].jobs_week);
+const volRank = []; volOrder.forEach((li, r) => volRank[li] = r);
+const maxVol = Math.max(1, ...LANES.map(n => n.jobs_week));
+const maxPot = Math.max(1, ...LANES.filter(n => n.eligible).map(n => n.potential_month));
+const cand = (D.candidates || []).filter(id => LANES.some(n => n.id === id));
+const CHECK_T0 = 14.95, CHECK_DT = Math.min(0.34, 3.7 / Math.max(1, cand.length));
+const checkTime = id => { const k = cand.indexOf(id); return k < 0 ? null : CHECK_T0 + k * CHECK_DT; };
+const TOP_T = Math.max(CHECK_T0 + cand.length * CHECK_DT + 0.25, 18.6);
+const verdictOf = id => (LANES.find(n => n.id === id) || {}).verdict;
+
+// geometry
+const FLOW = { x: 40, y: 206, w: 1000, h: 418 };
+const SRC = { x: 56, y: 240, w: 168, h: 52 };
+const SCOUT = { x: 140, y: 356 };
+const GATE = { x: 300, y0: 252, y1: 470 };
+const MAPPER = { x: 418, y: 362 };
+const LANE = { lx: 690, bx: 702, bw: 262, y0: 238, dy: 18.6 };
+const BINS = { x: 56, y: 486 };
+
+function laneY(li, t) {
+  const k = ease(prog(t, 11.9, 13.3));
+  return LANE.y0 + LANE.dy * lerp(volRank[li], li, k);
+}
+
+// ---------- particles ----------
+const N = 900;
+const R = rng(20261101);
+const cutN = P.read ? Math.round(N * P.cut / P.read) : 0;
+const unN = P.read ? Math.round(N * P.unmapped / P.read) : 0;
+const reasons = Object.entries(P.cut_reasons || {}).slice(0, 5);
+const reasonTotal = reasons.reduce((s, [, v]) => s + v, 0) || 1;
+// fates: shuffled indices
+const fate = new Array(N).fill(0).map((_, i) => i);
+for (let i = N - 1; i > 0; i--) { const j = Math.floor(R() * (i + 1)); [fate[i], fate[j]] = [fate[j], fate[i]]; }
+const laneWeights = LANES.map(n => n.jobs_week);
+const lwSum = laneWeights.reduce((a, b) => a + b, 0) || 1;
+const parts = [];
+let laneCursor = 0;
+const laneAlloc = []; // particle -> lane, proportional
+{
+  const keptN = N - cutN - unN;
+  const quota = laneWeights.map(w => w / lwSum * keptN);
+  const got = new Array(NL).fill(0);
+  for (let k = 0; k < keptN; k++) {
+    let best = 0, bestGap = -1e9;
+    for (let l = 0; l < NL; l++) { const gap = quota[l] - got[l]; if (gap > bestGap) { bestGap = gap; best = l; } }
+    got[best]++; laneAlloc.push(best);
+  }
+  // shuffle lane allocation so lanes fill together
+  for (let i = laneAlloc.length - 1; i > 0; i--) { const j = Math.floor(R() * (i + 1)); [laneAlloc[i], laneAlloc[j]] = [laneAlloc[j], laneAlloc[i]]; }
+}
+let keptIdx = 0, cutIdx = 0;
+for (let i = 0; i < N; i++) {
+  const s = 0.9 + 4.6 * (i + R() * 0.9) / N;
+  const a = s + 1.05 + R() * 0.5;
+  const gy = GATE.y0 + 14 + R() * (GATE.y1 - GATE.y0 - 28);
+  const jx = (R() - .5) * 60;
+  const f = fate[i];
+  const p = { s, a, gy, jx, mid: R() };
+  if (f < cutN) {
+    // pick reason proportionally
+    let x = (cutIdx++ + .5) / Math.max(1, cutN) * reasonTotal, r = 0;
+    for (; r < reasons.length - 1; r++) { x -= reasons[r][1]; if (x <= 0) break; }
+    p.kind = "cut"; p.r = r;
+    p.tc = Math.max(a + 0.05, 5.15 + R() * 2.9); p.te = p.tc + 0.55 + R() * 0.25;
+  } else if (f < cutN + unN) {
+    p.kind = "un"; p.td = Math.max(a + .05, 7.0 + R() * 4.2); p.tm = p.td + 0.45; p.px = MAPPER.x - 40 + R() * 80; p.py = 494 + R() * 22;
+  } else {
+    p.kind = "lane"; p.l = laneAlloc[keptIdx++] ?? 0;
+    p.td = Math.max(a + .05, 7.0 + R() * 4.2); p.tm = p.td + 0.42; p.te = p.tm + 0.75 + R() * .3;
+  }
+  parts.push(p);
+}
+const arrivals = parts.map(p => p.a).sort((x, y) => x - y);
+const cutLand = parts.filter(p => p.kind === "cut").map(p => p.te).sort((x, y) => x - y);
+const reasonLand = reasons.map((_, r) => parts.filter(p => p.kind === "cut" && p.r === r).map(p => p.te).sort((x, y) => x - y));
+const laneLand = LANES.map((_, l) => parts.filter(p => p.kind === "lane" && p.l === l).map(p => p.te).sort((x, y) => x - y));
+const mapLand = parts.filter(p => p.kind !== "cut").map(p => p.kind === "lane" ? p.te : p.tm).sort((x, y) => x - y);
+
+const frac = (arr, t) => arr.length ? bsearch(arr, t) / arr.length : 0;
+const readAt = t => P.read * frac(arrivals, t);
+const cutAt = t => P.cut * frac(cutLand, t);
+const mappedAt = t => P.mapped * frac(mapLand, t);
+
+// ---------- glyphs: shape + accessory per agent ----------
+function glyph(id, x, y, r, col, t, active, halo = true) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.strokeStyle = col; ctx.fillStyle = C.bg; ctx.lineWidth = 1.6;
+  const pulse = active ? 0.5 + 0.5 * Math.sin(t * 9) : 0;
+  if (active && halo) { ctx.globalAlpha = 0.18 + 0.12 * pulse; ctx.beginPath(); ctx.arc(0, 0, r * 1.75, 0, 7); ctx.fillStyle = col; ctx.fill(); ctx.globalAlpha = 1; ctx.fillStyle = C.bg; }
+  ctx.beginPath();
+  if (id === "scout") { for (let k = 0; k < 6; k++) { const a = Math.PI / 6 + k * Math.PI / 3; ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r); } ctx.closePath(); }
+  else if (id === "mapper") { ctx.moveTo(0, -r * 1.1); ctx.lineTo(r * 1.1, 0); ctx.lineTo(0, r * 1.1); ctx.lineTo(-r * 1.1, 0); ctx.closePath(); }
+  else if (id === "skeptic") { ctx.rect(-r * .85, -r * .85, r * 1.7, r * 1.7); }
+  else if (id === "analyst") { ctx.moveTo(0, -r); ctx.lineTo(r * 1.05, r * .8); ctx.lineTo(-r * 1.05, r * .8); ctx.closePath(); }
+  else if (id === "briefer") { ctx.arc(0, 0, r * .95, 0, 7); }
+  else { ctx.rect(-r * .3, -r * 1.1, r * .6, r * 2.2); }
+  ctx.fill(); ctx.stroke();
+  // accessories
+  ctx.lineWidth = 1.4;
+  if (id === "scout") { // antenna with blinking tip
+    ctx.beginPath(); ctx.moveTo(r * .35, -r * .8); ctx.lineTo(r * .75, -r * 1.55); ctx.stroke();
+    ctx.beginPath(); ctx.arc(r * .78, -r * 1.62, 2.6, 0, 7); ctx.fillStyle = active && Math.sin(t * 14) > 0 ? C.amber : col; ctx.fill();
+    ctx.beginPath(); ctx.arc(0, 0, r * .28, 0, 7); ctx.fillStyle = col; ctx.fill();
+  } else if (id === "mapper") { // compass needle
+    const a = active ? t * 4 : 0.6;
+    ctx.beginPath(); ctx.moveTo(Math.cos(a) * r * .6, Math.sin(a) * r * .6); ctx.lineTo(-Math.cos(a) * r * .6, -Math.sin(a) * r * .6); ctx.stroke();
+    ctx.beginPath(); ctx.arc(Math.cos(a) * r * .6, Math.sin(a) * r * .6, 2.2, 0, 7); ctx.fillStyle = C.amber; ctx.fill();
+  } else if (id === "skeptic") { // magnifier
+    ctx.beginPath(); ctx.arc(-r * .12, -r * .12, r * .38, 0, 7); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(r * .15, r * .15); ctx.lineTo(r * .52, r * .52); ctx.lineWidth = 2.2; ctx.stroke();
+  } else if (id === "analyst") { // bars
+    ctx.fillStyle = col;
+    [[-.45, .35], [-.12, .55], [.21, .8]].forEach(([bx, bh], k) => { const hh = r * bh * (active ? .7 + .3 * Math.sin(t * 7 + k) : 1); ctx.fillRect(bx * r, r * .62 - hh, r * .22, hh); });
+  } else if (id === "briefer") { // paper sheet with folded corner
+    ctx.beginPath(); ctx.moveTo(-r * .38, -r * .5); ctx.lineTo(r * .18, -r * .5); ctx.lineTo(r * .4, -r * .28); ctx.lineTo(r * .4, r * .5); ctx.lineTo(-r * .38, r * .5); ctx.closePath(); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-r * .22, -r * .12); ctx.lineTo(r * .24, -r * .12); ctx.moveTo(-r * .22, r * .12); ctx.lineTo(r * .24, r * .12); ctx.stroke();
+  } else { // gate notches
+    ctx.beginPath(); for (let k = -2; k <= 2; k++) { ctx.moveTo(-r * .3, k * r * .4); ctx.lineTo(r * .3, k * r * .4); } ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// ---------- sections ----------
+function header(t) {
+  rect(0, 0, W, H, C.bg);
+  // faint grid
+  ctx.strokeStyle = C.grid; ctx.lineWidth = 1; ctx.beginPath();
+  for (let x = 40; x <= 1040; x += 40) { ctx.moveTo(x + .5, 0); ctx.lineTo(x + .5, H); }
+  ctx.stroke();
+  rect(0, 0, W, 84, C.bg);
+  const w = tracked("MONEY RADAR", 40, 47, font(27, 800), C.text, 2.2);
+  text("24/7", 40 + w + 14, 47, font(27, 300), C.faint);
+  text("5 Grok Bots + 1 python gate · read every open job · find where clients pay and nobody bids", 40, 71, font(13, 400), C.dim);
+  const live = 0.5 + 0.5 * Math.sin(t * 4);
+  ctx.beginPath(); ctx.arc(842, 42, 4.5, 0, 7); ctx.fillStyle = C.teal; ctx.globalAlpha = .45 + .55 * live; ctx.fill(); ctx.globalAlpha = 1;
+  text("LIVE", 852, 47, font(12, 700, true), C.teal);
+  text(`${D.day || ""} · run #${D.runs || 1}`, 1040, 47, font(12, 400, true), C.dim, "right");
+  if (D.demo) { stroke(948, 58, 92, 20, C.red); text("DEMO DATA", 994, 72, font(10.5, 700, true), C.red, "center"); }
+}
+
+function counters(t) {
+  const items = [
+    ["JOBS READ", fmt(readAt(t)), C.text],
+    ["CUT BY CODE", fmt(cutAt(t)), cutAt(t) > 0 ? C.red : C.text],
+    ["NICHES", fmt(P.niches * frac(mapLand, t)), C.text],
+    ["TYPICAL BIDS", t > 11.8 ? String(typical) : "—", C.text],
+    ["CHECKED ON WEB", String(cand.filter(id => t >= checkTime(id) + .2).length), C.text],
+    ["SURVIVED", t >= TOP_T ? String((D.top || []).length) : "—", t >= TOP_T ? C.amber : C.text],
+  ];
+  const bw = (1000 - 5 * 10) / 6;
+  items.forEach(([lab, val, col], i) => {
+    const x = 40 + i * (bw + 10), y = 92;
+    rect(x, y, bw, 66, C.panel); stroke(x, y, bw, 66, C.line);
+    tracked(lab, x + 12, y + 21, font(10, 600), C.faint, 1.2);
+    text(val, x + 12, y + 54, font(29, 500, true), col);
+  });
+}
+
+function rail(t) {
+  const y = 172, sw = 1000 / PH.length;
+  PH.forEach(([name, sub, a, b], i) => {
+    const x = 40 + i * sw;
+    const k = prog(t, a, b), on = t >= a && t < b + (i === PH.length - 1 ? 1 : 0), done = t >= b;
+    rect(x, y + 18, sw - 8, 2, C.line);
+    rect(x, y + 18, (sw - 8) * k, 2, done ? C.faint : C.teal);
+    text(String(i + 1).padStart(2, "0"), x, y + 10, font(11, 700, true), on ? C.teal : C.faint);
+    text(name, x + 24, y + 10, font(11, 700), on ? C.text : C.faint);
+    if (on) text(sub, x + 24 + ctx.measureText(name).width + 7, y + 10, font(11, 400), C.dim);
+  });
+}
+
+function flow(t) {
+  const f = FLOW;
+  rect(f.x, f.y, f.w, f.h, C.panel); stroke(f.x, f.y, f.w, f.h, C.line);
+  tracked("PIPELINE", f.x + 14, f.y + 20, font(10, 700), C.faint, 1.4);
+  // source
+  stroke(SRC.x, SRC.y, SRC.w, SRC.h, t < 6.6 && t > .8 ? C.teal : C.line);
+  text("freelancer.com", SRC.x + 12, SRC.y + 22, font(14, 600), C.text);
+  text("public API · no login", SRC.x + 12, SRC.y + 40, font(11, 400), C.dim);
+  // wires
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1; ctx.beginPath();
+  ctx.moveTo(SCOUT.x, SRC.y + SRC.h); ctx.lineTo(SCOUT.x, SCOUT.y - 26);
+  ctx.moveTo(SCOUT.x + 26, SCOUT.y); ctx.lineTo(GATE.x - 8, SCOUT.y);
+  ctx.moveTo(GATE.x + 8, MAPPER.y); ctx.lineTo(MAPPER.x - 28, MAPPER.y);
+  ctx.stroke();
+  // scout
+  glyph("scout", SCOUT.x, SCOUT.y, 22, C.teal, t, t > .8 && t < 6.6);
+  text("Scout", SCOUT.x, SCOUT.y + 44, font(12, 600), C.text, "center");
+  // gate
+  const gateOn = t > 5 && t < 8.6;
+  rect(GATE.x - 5, GATE.y0, 10, GATE.y1 - GATE.y0, gateOn ? "#1a2a2a" : C.ghost);
+  stroke(GATE.x - 5, GATE.y0, 10, GATE.y1 - GATE.y0, gateOn ? C.teal : C.faint);
+  for (let k = 0; k < 9; k++) rect(GATE.x - 9, GATE.y0 + 12 + k * 24, 18, 1, gateOn ? C.teal : C.faint);
+  text("GATE", GATE.x, GATE.y0 - 22, font(11, 700), C.text, "center");
+  text("python · $0", GATE.x, GATE.y0 - 8, font(10, 400, true), C.dim, "center");
+  // mapper
+  glyph("mapper", MAPPER.x, MAPPER.y, 20, C.violet, t, t > 7 && t < 11.6);
+  text("Mapper", MAPPER.x, MAPPER.y + 42, font(12, 600), C.text, "center");
+  // unmapped pile label
+  const un = P.unmapped * frac(parts.filter(p => p.kind === "un").map(p => p.tm).sort((a, b) => a - b), t);
+  text(`unmapped ${fmt(un)}`, MAPPER.x, 538, font(10.5, 400, true), C.faint, "center");
+  text("→ Mapper names them weekly", MAPPER.x, 553, font(10, 400), C.ghost, "center");
+  bins(t);
+  particles(t);
+  lanes(t);
+}
+
+function bins(t) {
+  const x = BINS.x, y = BINS.y;
+  tracked("CUT", x, y, font(10, 700), C.faint, 1.4);
+  text(fmt(cutAt(t)), x + 34, y, font(11, 700, true), C.red);
+  reasons.forEach(([name, total], r) => {
+    const yy = y + 16 + r * 21;
+    const n = total * frac(reasonLand[r], t);
+    text(name, x, yy + 9, font(11, 400), C.dim);
+    rect(x + 84, yy + 2, 120, 8, C.ghost);
+    rect(x + 84, yy + 2, 120 * n / Math.max(...reasons.map(r => r[1])), 8, C.red);
+    text(fmt(n), x + 212, yy + 10, font(10.5, 400, true), C.dim);
+  });
+}
+
+function lanes(t) {
+  const morph = ease(prog(t, 12.0, 13.4));
+  tracked(morph > .5 ? "NICHES · ~$/MONTH POTENTIAL" : "NICHES · JOBS THIS WEEK", LANE.lx - 180, LANE.y0 - 18, font(10, 700), C.faint, 1.3);
+  if (t > 12.2) text(`typical job: ${typical} bids`, LANE.bx + LANE.bw + 74, LANE.y0 - 18, font(10.5, 400, true), C.dim, "right");
+  LANES.forEach((n, li) => {
+    const y = laneY(li, t);
+    const filled = frac(laneLand[li], t);
+    const volLen = LANE.bw * n.jobs_week / maxVol * filled;
+    const potLen = n.eligible ? LANE.bw * n.potential_month / maxPot : LANE.bw * 0.04;
+    const len = lerp(volLen, potLen, morph);
+    const ct = checkTime(n.id);
+    const checked = ct !== null && t >= ct + .2;
+    const v = n.verdict;
+    const isTop = (D.top || []).includes(n.id) && t >= TOP_T;
+    const crowded = checked && v === "crowded";
+    let col = morph > .5 ? (n.eligible ? C.amber : C.faint) : C.teal;
+    if (crowded) col = C.red;
+    let labCol = morph > .5 && !n.eligible ? C.faint : C.text;
+    if (crowded) labCol = C.red;
+    if (t >= TOP_T && !isTop) { labCol = morph > .5 && n.eligible && !crowded ? C.dim : labCol; }
+    // label
+    text(trunc(n.name, 27), LANE.lx, y + 4, font(11.5, isTop ? 700 : 400), isTop ? C.amber : labCol, "right");
+    if (crowded) { ctx.font = font(11.5); const lw = ctx.measureText(trunc(n.name, 27)).width; rect(LANE.lx - lw, y, lw, 1.3, C.red); }
+    // track + bar
+    rect(LANE.bx, y - 1, LANE.bw, 2, C.grid);
+    ctx.globalAlpha = (t >= TOP_T && !isTop) ? .45 : 1;
+    rect(LANE.bx, y - 3, Math.max(0, len), 6, col);
+    ctx.globalAlpha = 1;
+    // value
+    if (morph > .02) {
+      ctx.globalAlpha = morph;
+      const val = n.eligible ? money(n.potential_month) : `${Math.round(n.median_bids)} bids`;
+      text(val, LANE.bx + LANE.bw + 74, y + 4, font(11, n.eligible ? 600 : 400, true), n.eligible ? (crowded ? C.red : isTop ? C.amber : C.text) : C.faint, "right");
+      ctx.globalAlpha = 1;
+    } else if (filled > 0) {
+      text(fmt(n.jobs_week * filled), LANE.bx + len + 6, y + 4, font(10, 400, true), C.dim);
+    }
+    // verdict mark
+    if (checked) {
+      const mk = v === "real" ? "✓" : v === "crowded" ? "✕" : v === "unclear" ? "?" : "·";
+      const mc = v === "real" ? C.green : v === "crowded" ? C.red : C.dim;
+      text(mk, LANE.bx + LANE.bw + 12, y + 4, font(12, 700), mc);
+    }
+    if (isTop) {
+      const rank = D.top.indexOf(n.id) + 1;
+      const g = 0.5 + 0.5 * Math.sin((t - TOP_T) * 5);
+      ctx.globalAlpha = .12 + .1 * g; rect(LANE.lx - 196, y - 9, LANE.bw + 280, 18, C.amber); ctx.globalAlpha = 1;
+      text(String(rank), LANE.lx - 188, y + 4, font(11, 800, true), C.amber);
+    }
+  });
+  // skeptic lens sweeping
+  if (t > CHECK_T0 - .3 && t < TOP_T + .2 && cand.length) {
+    const k = clamp((t - CHECK_T0) / CHECK_DT, 0, cand.length - 1);
+    const i0 = Math.floor(k), i1 = Math.min(cand.length - 1, i0 + 1);
+    const y0 = laneY(LANES.findIndex(n => n.id === cand[i0]), t), y1 = laneY(LANES.findIndex(n => n.id === cand[i1]), t);
+    const yy = lerp(y0, y1, ease(k - i0));
+    ctx.strokeStyle = C.green; ctx.globalAlpha = .5; ctx.lineWidth = 1; ctx.strokeRect(LANE.lx - 182.5, yy - 9.5, LANE.bw + 196, 19); ctx.globalAlpha = 1;
+    glyph("skeptic", LANE.lx - 196, yy, 8, C.green, t, true, false);
+  }
+}
+
+function particles(t) {
+  for (const p of parts) {
+    if (t < p.s) continue;
+    let x, y, col = C.teal, alpha = 0.9;
+    if (t < p.a) {
+      const k = (t - p.s) / (p.a - p.s);
+      if (k < .32) { const kk = k / .32; x = SCOUT.x + p.jx * (1 - kk) * .5; y = lerp(SRC.y + SRC.h, SCOUT.y, kk); }
+      else { const kk = (k - .32) / .68; x = qb(SCOUT.x, (SCOUT.x + GATE.x) / 2, GATE.x - 8, kk); y = qb(SCOUT.y, p.gy, p.gy, kk); }
+    } else if (p.kind === "cut") {
+      if (t < p.tc) { x = GATE.x - 8 - p.mid * 6; y = p.gy; alpha = .55; }
+      else if (t < p.te) {
+        const k = easeOut((t - p.tc) / (p.te - p.tc));
+        const by = BINS.y + 16 + p.r * 21 + 6;
+        x = qb(GATE.x - 8, GATE.x - 30, BINS.x + 200, k); y = qb(p.gy, p.gy + 30, by, k); col = C.red;
+      } else continue;
+    } else {
+      if (t < p.td) { x = GATE.x - 8 - p.mid * 6; y = p.gy; alpha = .55; }
+      else if (t < p.tm) { const k = ease((t - p.td) / (p.tm - p.td)); x = qb(GATE.x + 8, (GATE.x + MAPPER.x) / 2, MAPPER.x, k); y = qb(p.gy, p.gy, MAPPER.y, k); }
+      else if (p.kind === "un") { x = p.px; y = p.py; col = C.faint; alpha = .7; }
+      else if (t < p.te) {
+        const ly = laneY(p.l, t);
+        const k = ease((t - p.tm) / (p.te - p.tm));
+        const filled = frac(laneLand[p.l], t);
+        const ex = LANE.bx + Math.max(4, LANE.bw * LANES[p.l].jobs_week / maxVol * filled);
+        x = qb(MAPPER.x, LANE.bx - 180, ex, k); y = qb(MAPPER.y, ly, ly, k);
+        col = k > .8 ? C.teal : C.violet;
+      } else continue;
+    }
+    ctx.globalAlpha = alpha; ctx.fillStyle = col; ctx.fillRect(x - 1.3, y - 1.3, 2.6, 2.6);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// agent cards
+const AG = [
+  { id: "scout", name: "Scout", col: C.teal, tag: "BOT · daily 06:00", a: .8, b: 6.6 },
+  { id: "gate", name: "Gate", col: C.teal, tag: "CODE · $0 · no AI", a: 5.0, b: 8.6 },
+  { id: "mapper", name: "Mapper", col: C.violet, tag: "BOT · weekly", a: 7.0, b: 11.6 },
+  { id: "analyst", name: "Analyst", col: C.amber, tag: "BOT · weekly", a: 11.6, b: 14.6 },
+  { id: "skeptic", name: "Skeptic", col: C.green, tag: "BOT · daily 06:30", a: 14.6, b: 19.2 },
+  { id: "briefer", name: "Briefer", col: C.amber, tag: "BOT · daily 08:00", a: 19.2, b: 21.0 },
+];
+function handled(id, t) {
+  switch (id) {
+    case "scout": return [fmt(readAt(t)), "jobs read"];
+    case "gate": return [fmt(cutAt(t)), "cut by rules"];
+    case "mapper": return [fmt(mappedAt(t)), `jobs → ${fmt(P.niches * frac(mapLand, t))} niches`];
+    case "analyst": { const k = prog(t, 11.6, 14.4); return [fmt(Math.round((D.niches || []).length * k)), "niches scored"]; }
+    case "skeptic": { const c = cand.filter(x => t >= checkTime(x) + .2); return [String(c.length), `checked · ${c.filter(x => verdictOf(x) === "crowded").length} crowded`]; }
+    case "briefer": return [t > 20.2 ? "1" : "0", t > 20.2 ? "brief sent · 08:00" : "waiting"];
+  }
+  return ["", ""];
+}
+function activity(ag, tt) {
+  if (tt < ag.a || tt > ag.b + .3) return 0.04;
+  const k = (tt - ag.a) / (ag.b - ag.a);
+  const env = Math.sin(Math.PI * clamp(k));
+  const n = 0.5 + 0.5 * Math.sin(tt * 23 + ag.a * 7) * Math.sin(tt * 7.3 + ag.a);
+  return clamp(0.15 + env * (0.55 + 0.4 * n));
+}
+function agents(t) {
+  const y = 638, bw = (1000 - 5 * 10) / 6, h = 164;
+  AG.forEach((ag, i) => {
+    const x = 40 + i * (bw + 10);
+    const on = t >= ag.a && t < ag.b, done = t >= ag.b;
+    rect(x, y, bw, h, C.panel); stroke(x, y, bw, h, on ? ag.col : C.line);
+    if (ag.id === "gate") { ctx.setLineDash([4, 4]); stroke(x + 3, y + 3, bw - 6, h - 6, C.ghost); ctx.setLineDash([]); }
+    if (on) { ctx.globalAlpha = .1 + .06 * Math.sin(t * 9); rect(x + 1, y + 1, bw - 2, h - 2, ag.col); ctx.globalAlpha = 1; }
+    glyph(ag.id, x + 28, y + 34, 14, on ? ag.col : done ? ag.col : C.faint, t, on, false);
+    text(ag.name, x + 52, y + 32, font(15, 700), C.text);
+    text(ag.tag, x + 52, y + 49, font(10, 400, true), C.dim);
+    const st = on ? "RUNNING" : done ? "DONE" : "IDLE";
+    const sc = on ? ag.col : done ? C.green : C.faint;
+    ctx.font = font(10, 700, true); const sw = ctx.measureText(st).width + 14;
+    stroke(x + 12, y + 64, sw, 18, sc); text(st, x + 19, y + 77, font(10, 700, true), sc);
+    const [n, unit] = handled(ag.id, t);
+    text(n, x + 12, y + 112, font(22, 500, true), on ? C.text : done ? C.text : C.faint);
+    text(trunc(unit, 26), x + 12, y + 128, font(10, 400), C.dim);
+    // load sparkline up to now
+    ctx.beginPath(); ctx.strokeStyle = on ? ag.col : C.faint; ctx.lineWidth = 1.2;
+    const sx = x + 12, swid = bw - 24, sy = y + 154;
+    for (let k = 0; k <= 60; k++) {
+      const tt = k / 60 * T; if (tt > t) break;
+      const yy = sy - activity(ag, tt) * 16;
+      k ? ctx.lineTo(sx + swid * k / 60, yy) : ctx.moveTo(sx, yy);
+    }
+    ctx.stroke();
+  });
+}
+
+function table(t) {
+  const x = 40, y = 818, w = 590, h = 294;
+  rect(x, y, w, h, C.panel); stroke(x, y, w, h, C.line);
+  tracked("TOP NICHES · LAST 7 DAYS", x + 14, y + 22, font(10, 700), C.faint, 1.3);
+  const cols = [["#", 14, "left"], ["niche", 38, "left"], ["jobs/wk", 318, "right"], ["median", 386, "right"], ["bids", 434, "right"], ["~$/mo", 500, "right"], ["skeptic", 514, "left"]];
+  cols.forEach(([c, cx, al]) => text(c, x + cx, y + 46, font(10, 600), C.faint, al));
+  rect(x + 12, y + 54, w - 24, 1, C.line);
+  const rows = elig.slice(0, 10);
+  rows.forEach((n, i) => {
+    const k = prog(t, 11.9 + i * 0.07, 12.3 + i * 0.07);
+    if (k <= 0) return;
+    const yy = y + 76 + i * 22;
+    const ct = checkTime(n.id), checked = ct !== null && t >= ct + .2;
+    const crowded = checked && n.verdict === "crowded";
+    const isTop = (D.top || []).includes(n.id) && t >= TOP_T;
+    ctx.globalAlpha = k;
+    if (isTop) { ctx.globalAlpha = k * .14; rect(x + 8, yy - 15, w - 16, 21, C.amber); ctx.globalAlpha = k; }
+    const col = crowded ? C.red : isTop ? C.amber : C.text;
+    text(String(i + 1), x + 14, yy, font(11.5, 600, true), isTop ? C.amber : C.faint);
+    text(trunc(n.name, 33), x + 38, yy, font(12, isTop ? 700 : 400), col);
+    if (crowded) { ctx.font = font(12); rect(x + 38, yy - 4, ctx.measureText(trunc(n.name, 33)).width, 1.3, C.red); }
+    text(fmt(n.jobs_week), x + 318, yy, font(11.5, 400, true), C.dim, "right");
+    text("$" + fmt(n.median_value), x + 386, yy, font(11.5, 400, true), C.dim, "right");
+    text(String(Math.round(n.median_bids)), x + 434, yy, font(11.5, 400, true), n.median_bids < typical / 2 ? C.green : C.dim, "right");
+    text(money(n.potential_month), x + 500, yy, font(11.5, 600, true), col, "right");
+    if (checked) {
+      const v = n.verdict || "not yet";
+      text(v, x + 514, yy, font(11, 600, true), v === "real" ? C.green : v === "crowded" ? C.red : C.faint);
+    } else if (ct !== null && t > ct - .15) {
+      text("checking…", x + 514, yy, font(10.5, 400, true), C.dim);
+    }
+    ctx.globalAlpha = 1;
+  });
+  if (!rows.length) text("no niche passes the filters yet", x + 14, y + 80, font(12), C.dim);
+}
+
+function simChart(t) {
+  const x = 640, y = 818, w = 400, h = 294;
+  rect(x, y, w, h, C.panel); stroke(x, y, w, h, C.line);
+  tracked("SIMULATED FREELANCER", x + 14, y + 22, font(10, 700), C.faint, 1.3);
+  text("same rules · 4 bids/day · simulated $, not income", x + 14, y + 40, font(10, 400), C.dim);
+  const S = D.sim || {};
+  const days = S.days || [];
+  if (!days.length) { text("starts after the first few hundred jobs", x + 14, y + 80, font(12), C.dim); return; }
+  const gx = x + 16, gy = y + 66, gw = w - 92, gh = h - 108;
+  const maxV = Math.max(10, ...S.radar, ...S.random);
+  ctx.strokeStyle = C.grid; ctx.lineWidth = 1; ctx.beginPath();
+  for (let k = 0; k <= 3; k++) { const yy = gy + gh * k / 3; ctx.moveTo(gx, yy + .5); ctx.lineTo(gx + gw, yy + .5); }
+  ctx.stroke();
+  for (let k = 0; k <= 3; k++) text(money(maxV * (1 - k / 3)), gx + gw + 6, gy + gh * k / 3 + 4, font(9.5, 400, true), C.faint);
+  const k = ease(prog(t, 12.2, 15.6));
+  const nShow = (days.length - 1) * k;
+  const line = (arr, col, lw) => {
+    ctx.beginPath(); ctx.strokeStyle = col; ctx.lineWidth = lw;
+    let lx = gx, ly = gy + gh;
+    for (let i = 0; i <= Math.ceil(nShow); i++) {
+      const ii = Math.min(i, nShow);
+      const i0 = Math.floor(ii), i1 = Math.min(arr.length - 1, i0 + 1);
+      const v = lerp(arr[i0], arr[i1], ii - i0);
+      // step chart: money arrives in jumps
+      const px = gx + gw * ii / Math.max(1, days.length - 1), py = gy + gh * (1 - v / maxV);
+      if (i === 0) ctx.moveTo(px, py); else { ctx.lineTo(px, ly); ctx.lineTo(px, py); }
+      lx = px; ly = py;
+    }
+    ctx.stroke();
+    return [lx, ly];
+  };
+  const [rx, ry] = line(S.random, C.faint, 1.6);
+  const [ax, ay] = line(S.radar, C.amber, 2.4);
+  const idx = Math.min(days.length - 1, Math.floor(nShow + 1e-6));
+  if (k > 0) {
+    text("radar  " + money(lerp(S.radar[Math.floor(nShow)], S.radar[Math.min(days.length - 1, Math.floor(nShow) + 1)], nShow % 1)), gx + 4, gy + 14, font(12, 700, true), C.amber);
+    text("random " + money(S.random[idx]), gx + 4, gy + 30, font(12, 500, true), C.dim);
+  }
+  text(days[0].slice(5), gx, gy + gh + 16, font(9.5, 400, true), C.faint);
+  text(days[days.length - 1].slice(5), gx + gw, gy + gh + 16, font(9.5, 400, true), C.faint, "right");
+  const wins = (S.wins || []).filter(w => w.strategy === "radar").length, rw = (S.wins || []).filter(w => w.strategy === "random").length;
+  if (k > .98) text(`${wins} jobs won vs ${rw} · ${days.length} days replayed, no look-ahead`, x + 14, y + h - 12, font(10, 400), C.dim);
+}
+
+// log
+const LOGT = { scout: [1.2, 5.2], gate: [5.4, 8.4], mapper: [7.4, 11.4], skeptic: [14.8, 19.0], analyst: [11.8, 14.4], briefer: [19.4, 20.4] };
+const LOGC = { scout: C.teal, gate: C.teal, mapper: C.violet, skeptic: C.green, analyst: C.amber, briefer: C.amber };
+const logLines = (() => {
+  const ev = (D.events || []).slice();
+  const by = {};
+  ev.forEach(e => (by[e.agent] = by[e.agent] || []).push(e));
+  const synth = {
+    gate: [`cut ${fmt(P.cut)} · ` + reasons.slice(0, 3).map(([k, v]) => `${k} ${fmt(v)}`).join(" · ")],
+    mapper: [`mapped ${fmt(P.mapped)} jobs into ${P.niches} niches · ${fmt(P.unmapped)} unmapped`],
+    analyst: [`scored ${(D.niches || []).length} niches · typical job ${typical} bids`, `simulated freelancer replayed ${(D.sim && D.sim.days || []).length} days · radar vs random`],
+    briefer: [`brief ready · ` + (D.top || []).map(id => names[id] || id).join(" · ")],
+  };
+  Object.entries(synth).forEach(([a, msgs]) => { if (!by[a] || by[a].length < msgs.length) by[a] = (by[a] || []).concat(msgs.map(m => ({ agent: a, msg: m, ts: null }))); });
+  const out = [];
+  Object.entries(by).forEach(([a, list]) => {
+    const [t0, t1] = LOGT[a] || [1, 2];
+    const ll = list.slice(-12);
+    ll.forEach((e, i) => out.push({ t: t0 + (t1 - t0) * (ll.length === 1 ? 0 : i / (ll.length - 1)), agent: a, msg: e.msg, ts: e.ts }));
+  });
+  return out.sort((a, b) => a.t - b.t);
+})();
+function logs(t) {
+  const x = 40, y = 1128, w = 1000, h = 200;
+  rect(x, y, w, h, C.panel); stroke(x, y, w, h, C.line);
+  tracked("SHARED LOG · /workspace/money-radar · UTC", x + 14, y + 22, font(10, 700), C.faint, 1.3);
+  const shown = logLines.filter(l => l.t <= t).slice(-8);
+  shown.forEach((l, i) => {
+    const yy = y + 48 + i * 19;
+    const fresh = t - l.t < .35;
+    const hhmm = l.ts ? new Date(l.ts * 1000).toISOString().slice(11, 19) : "";
+    text(hhmm, x + 14, yy, font(11, 400, true), C.faint);
+    text(l.agent.padEnd(8, " "), x + 86, yy, font(11, 700, true), LOGC[l.agent] || C.dim);
+    text(trunc(l.msg, 98), x + 162, yy, font(11, 400, true), fresh ? C.text : C.dim);
+  });
+}
+
+function briefCard(t) {
+  const k = easeOut(prog(t, 19.5, 20.3));
+  if (k <= 0) return;
+  const w = 470, h = 186, x = 1040 - w - 10, y = lerp(1350, 1134, k);
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.6)"; ctx.shadowBlur = 30;
+  rect(x, y, w, h, "#11161b"); ctx.shadowBlur = 0;
+  stroke(x, y, w, h, C.amber);
+  glyph("briefer", x + 24, y + 26, 11, C.amber, t, false);
+  text("Briefer → you", x + 44, y + 30, font(13, 700), C.text);
+  text("08:00 · morning brief", x + w - 14, y + 30, font(10.5, 400, true), C.dim, "right");
+  (D.top || []).slice(0, 3).forEach((id, i) => {
+    const n = (D.niches || []).find(z => z.id === id); if (!n) return;
+    const yy = y + 62 + i * 30;
+    const kk = easeOut(prog(t, 20.3 + i * .35, 20.7 + i * .35));
+    ctx.globalAlpha = kk;
+    text(String(i + 1), x + 16, yy, font(13, 800, true), C.amber);
+    text(trunc(n.name, 26), x + 36, yy, font(13.5, 700), C.text);
+    text("~" + money(n.potential_month) + "/mo", x + w - 14, yy, font(13, 700, true), C.amber, "right");
+    text(`${fmt(n.jobs_week)} jobs/wk · median $${fmt(n.median_value)} · ${Math.round(n.median_bids)} bids (typical ${typical})`, x + 36, yy + 14, font(10.5, 400, true), C.dim);
+    ctx.globalAlpha = 1;
+  });
+  const kk = easeOut(prog(t, 21.6, 22.1));
+  ctx.globalAlpha = kk;
+  const cr = (D.crowded || []).map(id => names[id] || id);
+  const nChecked = cand.filter(id => verdictOf(id)).length;
+  const foot = cr.length ? `killed: ${trunc(cr.join(", "), 40)} (crowded elsewhere)`
+    : nChecked ? `${nChecked} niches checked on Fiverr, Upwork, Reddit · none crowded` : "Skeptic checks these at 06:30";
+  text(foot, x + 16, y + h - 14, font(10.5, 400), C.dim);
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+function render(t) {
+  t = clamp(t, 0, T);
+  ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0);
+  header(t);
+  const intro = easeOut(prog(t, 0, .6));
+  ctx.globalAlpha = intro;
+  counters(t);
+  rail(t);
+  flow(t);
+  agents(t);
+  table(t);
+  simChart(t);
+  logs(t);
+  briefCard(t);
+  ctx.globalAlpha = 1;
+}
+
+window.render = render;
+window.DURATION = T;
+
+if (!CAPTURE) {
+  const fit = () => { const s = Math.min(innerWidth / W, innerHeight / H); canvas.style.width = W * s + "px"; canvas.style.height = H * s + "px"; };
+  addEventListener("resize", fit); fit();
+  let t0 = performance.now();
+  const loop = now => { render((now - t0) / 1000); requestAnimationFrame(loop); };
+  addEventListener("click", () => t0 = performance.now());
+  addEventListener("keydown", e => { if (e.key === " ") t0 = performance.now(); });
+  const startAt = parseFloat(Q.get("t") || "0"); t0 -= startAt * 1000;
+  document.fonts && document.fonts.ready ? document.fonts.ready.then(() => requestAnimationFrame(loop)) : requestAnimationFrame(loop);
+} else {
+  render(parseFloat(Q.get("t") || "0"));
+}
+})();
+</script>
+</body>
+</html>
